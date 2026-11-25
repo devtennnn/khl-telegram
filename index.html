@@ -1249,34 +1249,48 @@
       return info;
     }
 
-    // 🤖 Let the bot find the channels/groups it belongs to (from recent updates)
-    btnDiscoverChats.addEventListener('click', async () => {
-      if (rateLimitTimerId) return;
+    // 🤖 Let the bot find the channels/groups it belongs to (from recent updates).
+    // silent = automatic run when the app opens: only checks NEW chats, no error banners.
+    let isDiscovering = false;
+    async function discoverChats(silent = false) {
+      if (isDiscovering || isSendingTelegram || rateLimitTimerId) return;
       const token = tgBotToken.value.trim();
-      if (!token) { setTelegramBanner('⚠️ សូមដាក់ Bot Token ជាមុនសិន!', 'error'); return; }
+      if (!token) { if (!silent) setTelegramBanner('⚠️ សូមដាក់ Bot Token ជាមុនសិន!', 'error'); return; }
       try { localStorage.setItem('khmer_lottery_tg_token', token); } catch (e) {}
 
+      isDiscovering = true;
       btnDiscoverChats.disabled = true;
       btnDiscoverChats.textContent = '⏳ កំពុងស្វែងរក...';
-      setTelegramBanner('Bot កំពុងស្វែងរក Channel/Group របស់វា...', 'info');
+      if (!silent) setTelegramBanner('Bot កំពុងស្វែងរក Channel/Group របស់វា...', 'info');
       try {
-        // Not passing "offset" so updates are NOT consumed (safe for other tools using the bot)
-        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?limit=100&timeout=0`);
-        const d = await res.json();
-        if (!d.ok) {
-          if (d.error_code === 409) {
-            setTelegramBanner('⚠️ Bot នេះកំពុងប្រើ Webhook (មាន Bot program ផ្សេងកំពុងដំណើរការ) ដូច្នេះមិនអាចស្វែងរកដោយស្វ័យប្រវត្តិបានទេ។ សូមបន្ថែម Channel/Group ដោយដៃ។', 'warning');
-          } else if (d.error_code === 429) {
-            startRateLimitCooldown(d.parameters?.retry_after || 30);
-          } else {
-            setTelegramBanner(`❌ ${friendlyTgError(d.description)}`, 'error');
+        // Read ALL pending updates (pages of 100). Pages after the first use "offset",
+        // which clears the ones already read — fine because the found chats are saved here.
+        const updates = [];
+        let offset = null;
+        for (let page = 0; page < 30; page++) {
+          const q = `limit=100&timeout=0${offset !== null ? '&offset=' + offset : ''}`;
+          const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?${q}`);
+          const d = await res.json();
+          if (!d.ok) {
+            if (silent) return;
+            if (d.error_code === 409) {
+              setTelegramBanner('⚠️ Bot នេះកំពុងប្រើ Webhook (មាន Bot program ផ្សេងកំពុងដំណើរការ) ដូច្នេះមិនអាចស្វែងរកដោយស្វ័យប្រវត្តិបានទេ។ សូមបន្ថែម Channel/Group ដោយដៃ។', 'warning');
+            } else if (d.error_code === 429) {
+              startRateLimitCooldown(d.parameters?.retry_after || 30);
+            } else {
+              setTelegramBanner(`❌ ${friendlyTgError(d.description)}`, 'error');
+            }
+            return;
           }
-          return;
+          updates.push(...d.result);
+          if (d.result.length < 100) break;
+          offset = d.result[d.result.length - 1].update_id + 1;
+          btnDiscoverChats.textContent = `⏳ កំពុងអាន ${updates.length}...`;
         }
 
         // Collect non-private chats; track the bot's latest membership status
         const found = new Map();
-        for (const u of d.result) {
+        for (const u of updates) {
           const chat = (u.my_chat_member || u.chat_member || u.channel_post || u.edited_channel_post ||
             u.message || u.edited_message || u.chat_join_request || u.message_reaction || u.callback_query?.message || {}).chat;
           if (!chat || chat.type === 'private') continue;
@@ -1284,17 +1298,21 @@
           let gone = prev.gone || false;
           if (u.my_chat_member) gone = ['left', 'kicked'].includes(u.my_chat_member.new_chat_member?.status);
           found.set(chat.id, { id: chat.id, title: chat.title || chat.username || String(chat.id), type: chat.type, username: chat.username || '', gone });
+          // A group upgraded to supergroup gets a new id
+          const mig = u.message?.migrate_to_chat_id;
+          if (mig) { const s = findChat(chat.id); if (s) s.id = mig; }
         }
-        // Also re-check chats already saved, so titles/rights stay fresh
-        chats.forEach(c => { if (!found.has(c.id)) found.set(c.id, { id: c.id, saved: c }); });
+        // Manual run: also re-check chats already saved, so titles/rights stay fresh.
+        // Silent run: only check chats that are new.
+        if (!silent) chats.forEach(c => { if (!found.has(c.id)) found.set(c.id, { id: c.id, saved: c }); });
 
-        const list = [...found.values()].filter(c => !c.gone);
+        const list = [...found.values()].filter(c => !c.gone && (c.saved || !silent || !findChat(c.id, c.username)));
         let added = 0, i = 0;
         for (const c of list) {
           btnDiscoverChats.textContent = `⏳ ពិនិត្យ ${++i}/${list.length}...`;
           const v = await verifyChat(token, c.id);
           if (v.rateLimited) { await sleep(v.rateLimited * 1000 + 500); continue; }
-          if (v.unauthorized) { setTelegramBanner('❌ ' + v.note, 'error'); return; }
+          if (v.unauthorized) { if (!silent) setTelegramBanner('❌ ' + v.note, 'error'); return; }
           if (c.saved) {
             if (v.st === 'err') { c.saved.st = 'err'; c.saved.note = v.note; }
             else Object.assign(c.saved, v, { id: (v.id ?? c.saved.id) });
@@ -1313,7 +1331,12 @@
         saveChats(); renderChatList();
 
         const ok = chats.filter(c => c.st === 'ok').length;
-        if (added) {
+        if (silent) {
+          if (added) {
+            setTelegramBanner(`🤖 Bot រកឃើញ Channel/Group ថ្មី ${added} កន្លែង ហើយបានបន្ថែមក្នុងបញ្ជី (សរុប ${chats.length})`, 'success');
+            showToast(`🤖 រកឃើញ Channel/Group ថ្មី ${added} កន្លែង`, 'info');
+          }
+        } else if (added) {
           setTelegramBanner(`✅ រកឃើញថ្មី ${added} កន្លែង! សរុប ${chats.length} (អាចផ្ញើបាន ${ok}) — ធីកកន្លែងដែលចង់ផ្ញើ`, 'success');
         } else if (!chats.length) {
           setTelegramBanner('⚠️ រកមិនឃើញទេ។ សូមផ្ញើសារ ១ ក្នុង Channel/Group នីមួយៗ (ឬដក Bot ចេញ ហើយដាក់ជា Admin ម្ដងទៀត) រួចចុចស្វែងរកម្ដងទៀត។', 'warning');
@@ -1321,11 +1344,18 @@
           setTelegramBanner(`ℹ️ មិនមានកន្លែងថ្មីទេ។ បញ្ជីមាន ${chats.length} (អាចផ្ញើបាន ${ok})។ បើខ្វះកន្លែងណា សូមផ្ញើសារ ១ ក្នុងនោះ រួចស្វែងរកម្ដងទៀត។`, 'warning');
         }
       } catch (err) {
-        setTelegramBanner('❌ Browser បានប្លុកការតភ្ជាប់ (CORS / Sandbox Restriction)។ សូមបើកឯកសារ .html នេះលើ Chrome/Safari ផ្ទាល់។', 'error');
+        if (!silent) setTelegramBanner('❌ Browser បានប្លុកការតភ្ជាប់ (CORS / Sandbox Restriction)។ សូមបើកឯកសារ .html នេះលើ Chrome/Safari ផ្ទាល់។', 'error');
       } finally {
+        isDiscovering = false;
         btnDiscoverChats.disabled = false;
         btnDiscoverChats.textContent = '🤖 ឱ្យ Bot ស្វែងរក Channel/Group';
       }
+    }
+    btnDiscoverChats.addEventListener('click', () => discoverChats(false));
+    // Auto-scan whenever the app is opened or brought back to the screen
+    setTimeout(() => discoverChats(true), 1500);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') discoverChats(true);
     });
 
     // ➕ Manual add (also runs automatically before sending if the box has text)
@@ -1426,6 +1456,7 @@
     // Uploads the image once, then re-uses Telegram's file_id for the rest (fast).
     btnSendTelegram.addEventListener('click', async () => {
       if (isSendingTelegram || rateLimitTimerId) return;
+      if (isDiscovering) { showToast('⏳ Bot កំពុងស្វែងរក Channel/Group... សូមរង់ចាំបន្តិច', 'info'); return; }
 
       const token = tgBotToken.value.trim();
       if (parseChatIds(tgChatId.value).length) await addManualChats();
