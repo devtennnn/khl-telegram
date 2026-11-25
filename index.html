@@ -371,13 +371,13 @@
               />
             </div>
             <div>
-              <label class="block text-xs font-semibold text-gray-700 mb-1">Channel Username ឬ Chat ID</label>
-              <input
-                type="text"
+              <label class="block text-xs font-semibold text-gray-700 mb-1">Channel / Group ទាំងអស់ (មួយបន្ទាត់ មួយ) <span id="tgChatCount" class="text-sky-600"></span></label>
+              <textarea
                 id="tgChatId"
-                placeholder="@channel_username ឬ -100123456789"
-                class="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none"
-              />
+                rows="4"
+                placeholder="@channel_1&#10;@channel_2&#10;-100123456789  (Group)&#10;https://t.me/channel_3"
+                class="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm font-mono focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none resize-y"
+              ></textarea>
             </div>
           </div>
 
@@ -413,6 +413,8 @@
 
           <!-- Inline Status / Error 429 Cooldown Banner -->
           <div id="telegramStatusBanner" class="hidden rounded-xl px-3.5 py-2.5 text-xs font-semibold border"></div>
+          <!-- Per-channel results (multi-send) -->
+          <ul id="tgMultiResults" class="hidden space-y-1 text-xs rounded-xl border border-gray-200 bg-gray-50 p-2.5 max-h-56 overflow-y-auto"></ul>
 
           <p class="text-[11px] text-gray-400">
             * ចំណាំ៖ ត្រូវប្រាកដថាអ្នកបានបញ្ចូល Bot ជា Admin នៅក្នុង Channel ឬ Group របស់អ្នករួចរាល់ហើយ។ ប្រព័ន្ធមានមុខងារការពារ Error 429 ដោយស្វ័យប្រវត្តិ។
@@ -987,7 +989,7 @@
           isSendingTelegram = false;
           btnSendTelegram.disabled = false;
           btnTestTelegram.disabled = false;
-          btnSendTelegram.innerHTML = '<span>ផ្ញើចូល Telegram</span>';
+          btnSendTelegram.innerHTML = sendBtnLabel();
           try { localStorage.removeItem(RATE_LIMIT_STORAGE_KEY); } catch (e) {}
           setTelegramBanner('✅ ផុតកំណត់រង់ចាំហើយ! អ្នកអាចផ្ញើរូបភាពចូល Telegram ម្ដងទៀតបាន។', 'success');
         }
@@ -1104,46 +1106,115 @@
 
     // Helper to clean Chat ID (e.g. converts https://t.me/mychannel -> @mychannel)
     function normalizeChatId(rawId) {
-      let id = rawId.trim();
-      if (id.startsWith('https://t.me/')) {
-        id = '@' + id.replace('https://t.me/', '').split('/')[0];
-      } else if (id.startsWith('t.me/')) {
-        id = '@' + id.replace('t.me/', '').split('/')[0];
-      }
+      let id = (rawId || '').trim();
+      const m = id.match(/^(?:https?:\/\/)?(?:t|telegram)\.me\/([^\/?#\s]+)/i);
+      if (m) id = '@' + m[1];
       return id;
     }
 
-    // Single lightweight request (getChat) to verify both Token & Channel Admin access
+    // ===== Multi Channel / Group support =====
+    // One per line (comma / semicolon also work). Duplicates removed.
+    function parseChatIds(raw) {
+      const seen = new Set();
+      return (raw || '').split(/[\n,;]+/).map(normalizeChatId).filter(id => {
+        if (!id || seen.has(id.toLowerCase())) return false;
+        seen.add(id.toLowerCase());
+        return true;
+      });
+    }
+    const tgChatCount = document.getElementById('tgChatCount');
+    const tgMultiResults = document.getElementById('tgMultiResults');
+    function updateChatCount() {
+      const n = parseChatIds(tgChatId.value).length;
+      tgChatCount.textContent = n ? `(${n})` : '';
+      btnSendTelegram.innerHTML = btnSendTelegram.disabled ? btnSendTelegram.innerHTML : sendBtnLabel();
+    }
+    function sendBtnLabel() {
+      const n = parseChatIds(tgChatId.value).length;
+      return n > 1 ? `<span>ផ្ញើចូលទាំង ${n} កន្លែង</span>` : '<span>ផ្ញើចូល Telegram</span>';
+    }
+    tgChatId.addEventListener('input', updateChatCount);
+    updateChatCount();
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function initResults(ids) {
+      tgMultiResults.innerHTML = ids.map((id, i) =>
+        `<li id="tgRes${i}" class="flex gap-2"><span class="shrink-0">⏳</span><span class="font-mono text-gray-700">${escapeHtml(id)}</span><span class="text-gray-400 ml-auto text-right">កំពុងរង់ចាំ...</span></li>`
+      ).join('');
+      tgMultiResults.classList.remove('hidden');
+    }
+    function setResult(i, icon, text, cls = 'text-gray-500') {
+      const li = document.getElementById('tgRes' + i);
+      if (!li) return;
+      li.children[0].textContent = icon;
+      li.children[2].textContent = text;
+      li.children[2].className = cls + ' ml-auto text-right';
+    }
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // Calls Telegram; waits & retries automatically on short 429s (<= 60s)
+    async function tgRequest(url, makeInit, onWait) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const res = await fetch(url, makeInit ? makeInit() : undefined);
+        const data = await res.json();
+        if (res.status === 429 || data.error_code === 429) {
+          const wait = data.parameters?.retry_after || 30;
+          if (wait > 60 || attempt === 2) return { data, rateLimited: wait };
+          if (onWait) onWait(wait);
+          await sleep(wait * 1000 + 500);
+          continue;
+        }
+        return { data };
+      }
+    }
+
+    // Check every Channel / Group (getChat)
     btnTestTelegram.addEventListener('click', async () => {
-      if (rateLimitTimerId) return;
+      if (rateLimitTimerId || isSendingTelegram) return;
 
       const token = tgBotToken.value.trim();
-      const chatId = normalizeChatId(tgChatId.value);
-      tgChatId.value = chatId;
+      const ids = parseChatIds(tgChatId.value);
+      tgChatId.value = ids.join('\n'); updateChatCount();
 
-      if (!token || !chatId) {
+      if (!token || !ids.length) {
         setTelegramBanner('⚠️ សូមបំពេញ Bot Token និង Channel/Chat ID ជាមុនសិន!', 'error');
         return;
       }
 
       btnTestTelegram.disabled = true;
       btnTestTelegram.innerHTML = '<span>⏳ កំពុងពិនិត្យ...</span>';
-      setTelegramBanner('កំពុងពិនិត្យការតភ្ជាប់ទៅ Channel...', 'info');
+      setTelegramBanner(`កំពុងពិនិត្យ ${ids.length} Channel/Group...`, 'info');
+      initResults(ids);
 
-      let inCooldown = false;
+      let ok = 0, inCooldown = false;
       try {
-        const chatRes = await fetch(`https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(chatId)}`);
-        const chatData = await chatRes.json();
-
-        if (chatData.ok) {
-          const title = chatData.result.title || chatId;
-          setTelegramBanner(`✅ តភ្ជាប់ជោគជ័យ! Bot ស្គាល់ Channel "${title}" ហើយ។`, 'success');
-        } else if (chatRes.status === 429 || chatData.error_code === 429) {
-          inCooldown = true;
-          const retryAfter = chatData.parameters?.retry_after || 60;
-          startRateLimitCooldown(retryAfter);
-        } else {
-          setTelegramBanner(`❌ បរាជ័យ៖ ${friendlyTgError(chatData.description)}`, 'error');
+        for (let i = 0; i < ids.length; i++) {
+          const r = await tgRequest(
+            `https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(ids[i])}`, null,
+            w => setResult(i, '⏳', `រង់ចាំ ${w} វិនាទី (429)...`, 'text-amber-600'));
+          if (r.data.ok) {
+            ok++;
+            setResult(i, '✅', r.data.result.title || r.data.result.username || 'OK', 'text-emerald-700');
+          } else if (r.rateLimited) {
+            inCooldown = true;
+            for (let j = i; j < ids.length; j++) setResult(j, '⏸️', 'មិនទាន់ពិនិត្យ (429)', 'text-amber-600');
+            startRateLimitCooldown(r.rateLimited);
+            break;
+          } else {
+            setResult(i, '❌', friendlyTgError(r.data.description), 'text-red-600');
+            if ((r.data.description || '').toLowerCase().includes('unauthorized')) {
+              for (let j = i + 1; j < ids.length; j++) setResult(j, '❌', 'Bot Token មិនត្រឹមត្រូវ', 'text-red-600');
+              break;
+            }
+          }
+          await sleep(150);
+        }
+        if (!inCooldown) {
+          setTelegramBanner(
+            ok === ids.length ? `✅ តភ្ជាប់ជោគជ័យទាំង ${ok} កន្លែង!` : `⚠️ ជោគជ័យ ${ok}/${ids.length} — សូមមើលបញ្ជីខាងក្រោម`,
+            ok === ids.length ? 'success' : 'warning');
         }
       } catch (err) {
         setTelegramBanner(
@@ -1158,15 +1229,18 @@
       }
     });
 
+    // Send one image to ALL Channels / Groups.
+    // Uploads the image once, then re-uses Telegram's file_id for the rest (fast).
     btnSendTelegram.addEventListener('click', () => {
       if (isSendingTelegram || rateLimitTimerId) return;
 
       const token = tgBotToken.value.trim();
-      const chatId = normalizeChatId(tgChatId.value);
-      tgChatId.value = chatId;
+      const ids = parseChatIds(tgChatId.value);
+      tgChatId.value = ids.join('\n'); updateChatCount();
+      try { localStorage.setItem('khmer_lottery_tg_chatid', tgChatId.value); } catch (e) {}
       const caption = buildCaption();
 
-      if (!token || !chatId) {
+      if (!token || !ids.length) {
         setTelegramBanner('⚠️ សូមបំពេញ Bot Token និង Channel/Chat ID ជាមុនសិន!', 'error');
         showToast('⚠️ សូមបំពេញ Bot Token និង Channel/Chat ID ជាមុនសិន!', 'error');
         return;
@@ -1174,65 +1248,97 @@
 
       const invalid = validateResults();
       if (invalid) { setTelegramBanner(invalid, 'error'); showToast(invalid, 'error'); return; }
-      const sig = resultSignature() + '|' + chatId;
-      if (getLastSent().sig === sig && !confirm('លទ្ធផលនេះត្រូវបានផ្ញើរួចហើយទៅ Channel នេះ។ ផ្ញើម្តងទៀតមែនទេ?')) return;
+      const sig = resultSignature() + '|' + ids.join(',');
+      if (getLastSent().sig === sig && !confirm(`លទ្ធផលនេះត្រូវបានផ្ញើរួចហើយទៅ ${ids.length} កន្លែងនេះ។ ផ្ញើម្តងទៀតមែនទេ?`)) return;
 
       isSendingTelegram = true;
       btnSendTelegram.disabled = true;
+      btnTestTelegram.disabled = true;
       btnSendTelegram.innerHTML = '<span>⏳ កំពុងផ្ញើ...</span>';
       setTelegramBanner('', 'info');
 
       canvas.toBlob(async (blob) => {
-        if (!blob) {
+        const finish = () => {
           isSendingTelegram = false;
           btnSendTelegram.disabled = false;
-          btnSendTelegram.innerHTML = '<span>ផ្ញើចូល Telegram</span>';
+          btnTestTelegram.disabled = false;
+          btnSendTelegram.innerHTML = sendBtnLabel();
+        };
+        if (!blob) {
+          finish();
           setTelegramBanner('❌ មិនអាចបង្កើតឯកសាររូបភាពបានទេ', 'error');
           return;
         }
 
-        let inCooldown = false;
-        try {
-          const formData = new FormData();
-          formData.append('chat_id', chatId);
-          const asFile = chkSendAsFile.checked || blob.size > 9.5 * 1024 * 1024; // sendPhoto limit is 10MB
-          formData.append(asFile ? 'document' : 'photo', blob, 'lottery_result.jpg');
-          if (caption) {
-            formData.append('caption', caption);
-          }
+        initResults(ids);
+        const asFile = chkSendAsFile.checked || blob.size > 9.5 * 1024 * 1024; // sendPhoto limit is 10MB
+        const field = asFile ? 'document' : 'photo';
+        const url = `https://api.telegram.org/bot${token}/${asFile ? 'sendDocument' : 'sendPhoto'}`;
+        let fileId = null, ok = 0, inCooldown = false, blocked = false;
 
-          const response = await fetch(`https://api.telegram.org/bot${token}/${asFile ? 'sendDocument' : 'sendPhoto'}`, {
-            method: 'POST',
-            body: formData
-          });
-          const data = await response.json();
+        for (let i = 0; i < ids.length; i++) {
+          btnSendTelegram.innerHTML = `<span>⏳ កំពុងផ្ញើ ${i + 1}/${ids.length}...</span>`;
+          setResult(i, '📤', 'កំពុងផ្ញើ...', 'text-sky-600');
+          try {
+            const r = await tgRequest(url, () => {
+              const fd = new FormData();
+              fd.append('chat_id', ids[i]);
+              if (fileId) fd.append(field, fileId);
+              else fd.append(field, blob, 'lottery_result.jpg');
+              if (caption) fd.append('caption', caption);
+              return { method: 'POST', body: fd };
+            }, w => setResult(i, '⏳', `រង់ចាំ ${w} វិនាទី (429)...`, 'text-amber-600'));
 
-          if (data.ok) {
-            saveLastSent(sig);
-            setTelegramBanner('✅ បានបង្ហោះរូបភាពចូល Telegram Channel ដោយជោគជ័យ!', 'success');
-            showToast('🚀 បានបង្ហោះរូបភាពចូល Telegram Channel ដោយជោគជ័យ!');
-          } else if (response.status === 429 || data.error_code === 429) {
-            inCooldown = true;
-            const retryAfter = data.parameters?.retry_after || 30;
-            showToast(`⚠️ ផ្ញើញឹកញាប់ពេក (429)! សូមរង់ចាំ ${retryAfter} វិនាទី`, 'error');
-            startRateLimitCooldown(retryAfter);
-          } else {
-            const errMsg = friendlyTgError(data.description);
-            setTelegramBanner(`❌ Telegram បដិសេធ៖ ${errMsg}`, 'error');
-            showToast(`❌ បរាជ័យ៖ ${errMsg}`, 'error');
+            if (r.data.ok) {
+              ok++;
+              setResult(i, '✅', 'ផ្ញើរួច', 'text-emerald-700');
+              if (!fileId) {
+                const res = r.data.result || {};
+                fileId = asFile ? res.document?.file_id : (res.photo && res.photo[res.photo.length - 1]?.file_id);
+              }
+            } else if (r.rateLimited) {
+              inCooldown = true;
+              for (let j = i; j < ids.length; j++) setResult(j, '⏸️', 'មិនទាន់ផ្ញើ (429)', 'text-amber-600');
+              showToast(`⚠️ ផ្ញើញឹកញាប់ពេក (429)! សូមរង់ចាំ ${r.rateLimited} វិនាទី`, 'error');
+              startRateLimitCooldown(r.rateLimited);
+              break;
+            } else {
+              setResult(i, '❌', friendlyTgError(r.data.description), 'text-red-600');
+              if ((r.data.description || '').toLowerCase().includes('unauthorized')) {
+                for (let j = i + 1; j < ids.length; j++) setResult(j, '❌', 'Bot Token មិនត្រឹមត្រូវ', 'text-red-600');
+                break;
+              }
+            }
+          } catch (err) {
+            if (ok === 0 && i === 0) { blocked = true; break; }
+            setResult(i, '❌', 'Network error', 'text-red-600');
           }
-        } catch (err) {
+          if (i < ids.length - 1) await sleep(400); // gentle pace to avoid 429
+        }
+
+        if (ok > 0) saveLastSent(sig);
+
+        if (blocked) {
+          tgMultiResults.classList.add('hidden');
           setTelegramBanner(
             '❌ មិនអាចផ្ញើចេញពីផ្ទាំង Preview នេះបានទេ (CORS/Network Blocked)។ សូមរក្សាទុកឯកសារ .html នេះទៅបើកលើ Browser (Chrome/Safari) ផ្ទាល់!',
             'error'
           );
           showToast('❌ Browser ប្លុកការផ្ញើ! សូមបើកឯកសារ .html លើ Chrome/Safari ផ្ទាល់', 'error');
-        } finally {
-          if (!inCooldown) {
-            isSendingTelegram = false;
-            btnSendTelegram.disabled = false;
-            btnSendTelegram.innerHTML = '<span>ផ្ញើចូល Telegram</span>';
+        } else if (!inCooldown) {
+          if (ok === ids.length) {
+            setTelegramBanner(`✅ បានបង្ហោះរូបភាពចូលទាំង ${ok} Channel/Group ដោយជោគជ័យ!`, 'success');
+            showToast(`🚀 បានផ្ញើចូល ${ok}/${ids.length} កន្លែង!`);
+          } else {
+            setTelegramBanner(`⚠️ ផ្ញើជោគជ័យ ${ok}/${ids.length} — សូមមើលកន្លែងដែលបរាជ័យខាងក្រោម`, ok ? 'warning' : 'error');
+            showToast(`⚠️ ជោគជ័យ ${ok}/${ids.length}`, 'error');
           }
+        }
+
+        if (inCooldown) {
+          isSendingTelegram = false; // cooldown timer keeps buttons locked
+        } else {
+          finish();
         }
       }, 'image/jpeg', 0.95);
     });
