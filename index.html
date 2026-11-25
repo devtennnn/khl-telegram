@@ -371,14 +371,29 @@
               />
             </div>
             <div>
-              <label class="block text-xs font-semibold text-gray-700 mb-1">Channel / Group ទាំងអស់ (មួយបន្ទាត់ មួយ) <span id="tgChatCount" class="text-sky-600"></span></label>
-              <textarea
-                id="tgChatId"
-                rows="4"
-                placeholder="@channel_1&#10;@channel_2&#10;-100123456789  (Group)&#10;https://t.me/channel_3"
-                class="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm font-mono focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none resize-y"
-              ></textarea>
+              <label class="block text-xs font-semibold text-gray-700 mb-1">បន្ថែមដោយដៃ (បើ Bot រកមិនឃើញ)</label>
+              <div class="flex gap-2">
+                <textarea
+                  id="tgChatId"
+                  rows="1"
+                  placeholder="@channel ឬ -100123456789"
+                  class="flex-1 min-w-0 rounded-xl border border-gray-300 px-3 py-2 text-sm font-mono focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none resize-y"
+                ></textarea>
+                <button type="button" id="btnAddChats" class="px-3 rounded-xl bg-gray-100 hover:bg-gray-200 border border-gray-300 text-sm font-bold whitespace-nowrap cursor-pointer">➕ បន្ថែម</button>
+              </div>
             </div>
+          </div>
+
+          <!-- Channel / Group picker -->
+          <div class="rounded-xl border border-sky-200 bg-sky-50/60 p-3 space-y-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" id="btnDiscoverChats" class="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-gray-400 text-white font-bold text-sm shadow-sm cursor-pointer">🤖 ឱ្យ Bot ស្វែងរក Channel/Group</button>
+              <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-700 ml-auto cursor-pointer select-none">
+                <input type="checkbox" id="chkSelectAllChats" class="accent-sky-600 w-4 h-4" /> ជ្រើសទាំងអស់ <span id="tgChatCount" class="text-sky-600"></span>
+              </label>
+            </div>
+            <ul id="tgChatList" class="space-y-1 max-h-72 overflow-y-auto"></ul>
+            <p class="text-[11px] text-gray-500 leading-relaxed">💡 Bot ឃើញតែ Channel/Group ដែលមានសកម្មភាពក្នុង ២៤ ម៉ោងចុងក្រោយ។ បើកន្លែងណារកមិនឃើញ៖ ផ្ញើសារ ១ ក្នុង Channel/Group នោះ (ឬដក Bot ចេញ ហើយដាក់ជា Admin ម្ដងទៀត) រួចចុចស្វែងរកម្ដងទៀត។ បញ្ជីត្រូវរក្សាទុកក្នុង Browser នេះ — រកម្ដងគឺប្រើបានរហូត។</p>
           </div>
 
           <div class="flex flex-col sm:flex-row items-center gap-3">
@@ -944,7 +959,6 @@
       try { localStorage.setItem('khmer_lottery_tg_token', tgBotToken.value.trim()); } catch (e) {}
     });
     tgChatId.addEventListener('change', () => {
-      try { localStorage.setItem('khmer_lottery_tg_chatid', tgChatId.value.trim()); } catch (e) {}
     });
 
     function setTelegramBanner(message, type = 'info') {
@@ -1111,9 +1125,6 @@
       if (m) id = '@' + m[1];
       return id;
     }
-
-    // ===== Multi Channel / Group support =====
-    // One per line (comma / semicolon also work). Duplicates removed.
     function parseChatIds(raw) {
       const seen = new Set();
       return (raw || '').split(/[\n,;]+/).map(normalizeChatId).filter(id => {
@@ -1122,26 +1133,230 @@
         return true;
       });
     }
-    const tgChatCount = document.getElementById('tgChatCount');
-    const tgMultiResults = document.getElementById('tgMultiResults');
-    function updateChatCount() {
-      const n = parseChatIds(tgChatId.value).length;
-      tgChatCount.textContent = n ? `(${n})` : '';
-      btnSendTelegram.innerHTML = btnSendTelegram.disabled ? btnSendTelegram.innerHTML : sendBtnLabel();
-    }
-    function sendBtnLabel() {
-      const n = parseChatIds(tgChatId.value).length;
-      return n > 1 ? `<span>ផ្ញើចូលទាំង ${n} កន្លែង</span>` : '<span>ផ្ញើចូល Telegram</span>';
-    }
-    tgChatId.addEventListener('input', updateChatCount);
-    updateChatCount();
-
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
-    function initResults(ids) {
-      tgMultiResults.innerHTML = ids.map((id, i) =>
-        `<li id="tgRes${i}" class="flex gap-2"><span class="shrink-0">⏳</span><span class="font-mono text-gray-700">${escapeHtml(id)}</span><span class="text-gray-400 ml-auto text-right">កំពុងរង់ចាំ...</span></li>`
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // ===== Saved Channel / Group list (checkbox picker) =====
+    const CHATS_KEY = 'khmer_lottery_tg_chats_v1';
+    const tgChatList = document.getElementById('tgChatList');
+    const tgChatCount = document.getElementById('tgChatCount');
+    const chkSelectAllChats = document.getElementById('chkSelectAllChats');
+    const btnDiscoverChats = document.getElementById('btnDiscoverChats');
+    const tgMultiResults = document.getElementById('tgMultiResults');
+    // item: { id, title, type, username, selected, st: 'ok'|'warn'|'err'|'', note }
+    let chats = [];
+    try { chats = JSON.parse(localStorage.getItem(CHATS_KEY) || '[]') || []; } catch (e) { chats = []; }
+
+    // Migrate IDs typed in the older version
+    if (!chats.length) {
+      const old = parseChatIds(localStorage.getItem('khmer_lottery_tg_chatid') || '');
+      chats = old.map(id => ({ id, title: id, type: '', selected: true, st: '' }));
+    }
+    tgChatId.value = '';
+    try { localStorage.removeItem('khmer_lottery_tg_chatid'); } catch (e) {}
+
+    function saveChats() { try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats)); } catch (e) {} }
+    const sameId = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+    function findChat(id, username) {
+      return chats.find(c => sameId(c.id, id) || (username && (sameId(c.id, '@' + username) || sameId(c.username || '', username))));
+    }
+    function upsertChat(info, selectNew = true) {
+      let c = findChat(info.id, info.username);
+      if (c) {
+        if (typeof info.id === 'number' || /^-\d+$/.test(String(info.id))) c.id = info.id; // prefer numeric id
+        ['title', 'type', 'username', 'st', 'note'].forEach(k => { if (info[k] !== undefined && info[k] !== '') c[k] = info[k]; });
+        return false;
+      }
+      chats.push({ id: info.id, title: info.title || String(info.id), type: info.type || '', username: info.username || '', selected: selectNew, st: info.st || '', note: info.note || '' });
+      return true;
+    }
+
+    const TYPE_LABEL = { channel: '📢 Channel', supergroup: '👥 Group', group: '👥 Group' };
+    const ST_ICON = { ok: '✅', warn: '⚠️', err: '❌' };
+    function selectedChats() { return chats.filter(c => c.selected); }
+    function sendBtnLabel() {
+      const n = selectedChats().length;
+      return n > 1 ? `<span>ផ្ញើចូលទាំង ${n} កន្លែង</span>` : '<span>ផ្ញើចូល Telegram</span>';
+    }
+    function renderChatList() {
+      if (!chats.length) {
+        tgChatList.innerHTML = '<li class="text-xs text-gray-500 py-2 text-center">មិនទាន់មាន Channel/Group ទេ — ចុច “🤖 ឱ្យ Bot ស្វែងរក” ឬបន្ថែមដោយដៃ</li>';
+      } else {
+        tgChatList.innerHTML = chats.map((c, i) => `
+          <li class="flex items-center gap-2 bg-white rounded-lg border ${c.selected ? 'border-sky-300' : 'border-gray-200'} px-2.5 py-1.5">
+            <input type="checkbox" data-i="${i}" class="tg-chk accent-sky-600 w-4 h-4 shrink-0 cursor-pointer" ${c.selected ? 'checked' : ''} />
+            <div class="min-w-0 flex-1 cursor-pointer" data-toggle="${i}">
+              <div class="text-sm font-semibold text-gray-800 truncate">${ST_ICON[c.st] || ''} ${escapeHtml(c.title || c.id)}</div>
+              <div class="text-[11px] text-gray-500 truncate">${TYPE_LABEL[c.type] || ''} ${escapeHtml(c.username ? '@' + c.username : c.id)}${c.note ? ' · <span class="' + (c.st === 'ok' ? 'text-emerald-600' : 'text-red-600') + '">' + escapeHtml(c.note) + '</span>' : ''}</div>
+            </div>
+            <button type="button" data-del="${i}" class="text-gray-400 hover:text-red-600 text-sm px-1 cursor-pointer" title="ដកចេញ">✕</button>
+          </li>`).join('');
+      }
+      const n = selectedChats().length;
+      tgChatCount.textContent = chats.length ? `(${n}/${chats.length})` : '';
+      chkSelectAllChats.checked = chats.length > 0 && n === chats.length;
+      chkSelectAllChats.indeterminate = n > 0 && n < chats.length;
+      if (!btnSendTelegram.disabled) btnSendTelegram.innerHTML = sendBtnLabel();
+    }
+    tgChatList.addEventListener('click', e => {
+      const del = e.target.closest('[data-del]');
+      const tog = e.target.closest('[data-toggle]');
+      const chk = e.target.closest('.tg-chk');
+      if (del) {
+        const c = chats[+del.dataset.del];
+        if (!confirm(`ដក "${c.title || c.id}" ចេញពីបញ្ជី?`)) return;
+        chats.splice(+del.dataset.del, 1);
+      } else if (chk) {
+        chats[+chk.dataset.i].selected = chk.checked;
+      } else if (tog) {
+        const c = chats[+tog.dataset.toggle]; c.selected = !c.selected;
+      } else return;
+      saveChats(); renderChatList();
+    });
+    chkSelectAllChats.addEventListener('change', () => {
+      chats.forEach(c => c.selected = chkSelectAllChats.checked);
+      saveChats(); renderChatList();
+    });
+
+    // Check one chat: title + whether the bot is allowed to post
+    async function verifyChat(token, id) {
+      const res = await fetch(`https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(id)}`);
+      const d = await res.json();
+      if (!d.ok) {
+        if (d.error_code === 429) return { rateLimited: d.parameters?.retry_after || 30 };
+        return { id, st: 'err', note: friendlyTgError(d.description), unauthorized: /unauthorized/i.test(d.description || '') };
+      }
+      const ch = d.result;
+      const info = { id: ch.id, title: ch.title || ch.username || String(id), type: ch.type, username: ch.username || '' };
+      try {
+        const botId = token.split(':')[0];
+        const mr = await (await fetch(`https://api.telegram.org/bot${token}/getChatMember?chat_id=${encodeURIComponent(ch.id)}&user_id=${botId}`)).json();
+        if (mr.ok) {
+          const m = mr.result;
+          let can;
+          if (m.status === 'creator') can = true;
+          else if (m.status === 'administrator') can = ch.type !== 'channel' || m.can_post_messages !== false;
+          else if (ch.type === 'channel') can = false;
+          else if (m.status === 'member') can = true;
+          else if (m.status === 'restricted') can = !!(m.can_send_photos || m.can_send_documents || m.can_send_media_messages);
+          else can = false;
+          info.st = can ? 'ok' : 'warn';
+          info.note = can ? (m.status === 'administrator' || m.status === 'creator' ? 'Admin' : 'Member') : (m.status === 'left' || m.status === 'kicked' ? 'Bot មិននៅក្នុងនេះទៀតទេ' : 'Bot គ្មានសិទ្ធិបង្ហោះ');
+        }
+      } catch (e) {}
+      return info;
+    }
+
+    // 🤖 Let the bot find the channels/groups it belongs to (from recent updates)
+    btnDiscoverChats.addEventListener('click', async () => {
+      if (rateLimitTimerId) return;
+      const token = tgBotToken.value.trim();
+      if (!token) { setTelegramBanner('⚠️ សូមដាក់ Bot Token ជាមុនសិន!', 'error'); return; }
+      try { localStorage.setItem('khmer_lottery_tg_token', token); } catch (e) {}
+
+      btnDiscoverChats.disabled = true;
+      btnDiscoverChats.textContent = '⏳ កំពុងស្វែងរក...';
+      setTelegramBanner('Bot កំពុងស្វែងរក Channel/Group របស់វា...', 'info');
+      try {
+        // Not passing "offset" so updates are NOT consumed (safe for other tools using the bot)
+        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?limit=100&timeout=0`);
+        const d = await res.json();
+        if (!d.ok) {
+          if (d.error_code === 409) {
+            setTelegramBanner('⚠️ Bot នេះកំពុងប្រើ Webhook (មាន Bot program ផ្សេងកំពុងដំណើរការ) ដូច្នេះមិនអាចស្វែងរកដោយស្វ័យប្រវត្តិបានទេ។ សូមបន្ថែម Channel/Group ដោយដៃ។', 'warning');
+          } else if (d.error_code === 429) {
+            startRateLimitCooldown(d.parameters?.retry_after || 30);
+          } else {
+            setTelegramBanner(`❌ ${friendlyTgError(d.description)}`, 'error');
+          }
+          return;
+        }
+
+        // Collect non-private chats; track the bot's latest membership status
+        const found = new Map();
+        for (const u of d.result) {
+          const chat = (u.my_chat_member || u.chat_member || u.channel_post || u.edited_channel_post ||
+            u.message || u.edited_message || u.chat_join_request || u.message_reaction || u.callback_query?.message || {}).chat;
+          if (!chat || chat.type === 'private') continue;
+          const prev = found.get(chat.id) || {};
+          let gone = prev.gone || false;
+          if (u.my_chat_member) gone = ['left', 'kicked'].includes(u.my_chat_member.new_chat_member?.status);
+          found.set(chat.id, { id: chat.id, title: chat.title || chat.username || String(chat.id), type: chat.type, username: chat.username || '', gone });
+        }
+        // Also re-check chats already saved, so titles/rights stay fresh
+        chats.forEach(c => { if (!found.has(c.id)) found.set(c.id, { id: c.id, saved: c }); });
+
+        const list = [...found.values()].filter(c => !c.gone);
+        let added = 0, i = 0;
+        for (const c of list) {
+          btnDiscoverChats.textContent = `⏳ ពិនិត្យ ${++i}/${list.length}...`;
+          const v = await verifyChat(token, c.id);
+          if (v.rateLimited) { await sleep(v.rateLimited * 1000 + 500); continue; }
+          if (v.unauthorized) { setTelegramBanner('❌ ' + v.note, 'error'); return; }
+          if (c.saved) {
+            if (v.st === 'err') { c.saved.st = 'err'; c.saved.note = v.note; }
+            else Object.assign(c.saved, v, { id: (v.id ?? c.saved.id) });
+            continue;
+          }
+          if (v.st === 'err') continue; // bot no longer has access
+          if (upsertChat(v, v.st === 'ok')) added++;
+          await sleep(120);
+        }
+        // Remove duplicates (e.g. @username saved earlier + numeric id found now)
+        { const seen = new Set(); chats = chats.filter(c => { const k = String(c.id).toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }); }
+        // Mark chats the bot was removed from
+        [...found.values()].filter(c => c.gone).forEach(c => {
+          const s = findChat(c.id); if (s) { s.st = 'err'; s.note = 'Bot ត្រូវបានដកចេញ'; s.selected = false; }
+        });
+        saveChats(); renderChatList();
+
+        const ok = chats.filter(c => c.st === 'ok').length;
+        if (added) {
+          setTelegramBanner(`✅ រកឃើញថ្មី ${added} កន្លែង! សរុប ${chats.length} (អាចផ្ញើបាន ${ok}) — ធីកកន្លែងដែលចង់ផ្ញើ`, 'success');
+        } else if (!chats.length) {
+          setTelegramBanner('⚠️ រកមិនឃើញទេ។ សូមផ្ញើសារ ១ ក្នុង Channel/Group នីមួយៗ (ឬដក Bot ចេញ ហើយដាក់ជា Admin ម្ដងទៀត) រួចចុចស្វែងរកម្ដងទៀត។', 'warning');
+        } else {
+          setTelegramBanner(`ℹ️ មិនមានកន្លែងថ្មីទេ។ បញ្ជីមាន ${chats.length} (អាចផ្ញើបាន ${ok})។ បើខ្វះកន្លែងណា សូមផ្ញើសារ ១ ក្នុងនោះ រួចស្វែងរកម្ដងទៀត។`, 'warning');
+        }
+      } catch (err) {
+        setTelegramBanner('❌ Browser បានប្លុកការតភ្ជាប់ (CORS / Sandbox Restriction)។ សូមបើកឯកសារ .html នេះលើ Chrome/Safari ផ្ទាល់។', 'error');
+      } finally {
+        btnDiscoverChats.disabled = false;
+        btnDiscoverChats.textContent = '🤖 ឱ្យ Bot ស្វែងរក Channel/Group';
+      }
+    });
+
+    // ➕ Manual add (also runs automatically before sending if the box has text)
+    async function addManualChats() {
+      const ids = parseChatIds(tgChatId.value);
+      if (!ids.length) return 0;
+      const token = tgBotToken.value.trim();
+      let added = 0;
+      for (const id of ids) {
+        let info = { id, title: id, st: '' };
+        if (token) { try { const v = await verifyChat(token, id); if (!v.rateLimited) info = v.st === 'err' ? { ...info, st: 'err', note: v.note } : v; } catch (e) {} }
+        if (upsertChat(info, true)) added++;
+        else { const c = findChat(info.id, info.username); if (c) c.selected = true; }
+      }
+      tgChatId.value = '';
+      saveChats(); renderChatList();
+      return added;
+    }
+    document.getElementById('btnAddChats').addEventListener('click', async () => {
+      if (!parseChatIds(tgChatId.value).length) { setTelegramBanner('⚠️ សូមវាយ @channel ឬ Chat ID ជាមុនសិន', 'error'); return; }
+      const n = await addManualChats();
+      setTelegramBanner(n ? `✅ បានបន្ថែម ${n} កន្លែង` : 'ℹ️ មានក្នុងបញ្ជីរួចហើយ', n ? 'success' : 'warning');
+    });
+    tgChatId.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('btnAddChats').click(); } });
+
+    renderChatList();
+
+    // ===== Per-send result list =====
+    function initResults(list) {
+      tgMultiResults.innerHTML = list.map((c, i) =>
+        `<li id="tgRes${i}" class="flex gap-2"><span class="shrink-0">⏳</span><span class="text-gray-700 truncate">${escapeHtml(c.title || c.id)}</span><span class="text-gray-400 ml-auto text-right">កំពុងរង់ចាំ...</span></li>`
       ).join('');
       tgMultiResults.classList.remove('hidden');
     }
@@ -1152,7 +1367,6 @@
       li.children[2].textContent = text;
       li.children[2].className = cls + ' ml-auto text-right';
     }
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     // Calls Telegram; waits & retries automatically on short 429s (<= 60s)
     async function tgRequest(url, makeInit, onWait) {
@@ -1170,90 +1384,69 @@
       }
     }
 
-    // Check every Channel / Group (getChat)
+    // 🔍 Check the selected channels/groups
     btnTestTelegram.addEventListener('click', async () => {
       if (rateLimitTimerId || isSendingTelegram) return;
-
       const token = tgBotToken.value.trim();
-      const ids = parseChatIds(tgChatId.value);
-      tgChatId.value = ids.join('\n'); updateChatCount();
-
-      if (!token || !ids.length) {
-        setTelegramBanner('⚠️ សូមបំពេញ Bot Token និង Channel/Chat ID ជាមុនសិន!', 'error');
+      await addManualChats();
+      const list = selectedChats().length ? selectedChats() : chats;
+      if (!token || !list.length) {
+        setTelegramBanner('⚠️ សូមបំពេញ Bot Token ហើយជ្រើស Channel/Group ជាមុនសិន!', 'error');
         return;
       }
-
       btnTestTelegram.disabled = true;
       btnTestTelegram.innerHTML = '<span>⏳ កំពុងពិនិត្យ...</span>';
-      setTelegramBanner(`កំពុងពិនិត្យ ${ids.length} Channel/Group...`, 'info');
-      initResults(ids);
-
-      let ok = 0, inCooldown = false;
+      setTelegramBanner(`កំពុងពិនិត្យ ${list.length} Channel/Group...`, 'info');
+      let ok = 0;
       try {
-        for (let i = 0; i < ids.length; i++) {
-          const r = await tgRequest(
-            `https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(ids[i])}`, null,
-            w => setResult(i, '⏳', `រង់ចាំ ${w} វិនាទី (429)...`, 'text-amber-600'));
-          if (r.data.ok) {
-            ok++;
-            setResult(i, '✅', r.data.result.title || r.data.result.username || 'OK', 'text-emerald-700');
-          } else if (r.rateLimited) {
-            inCooldown = true;
-            for (let j = i; j < ids.length; j++) setResult(j, '⏸️', 'មិនទាន់ពិនិត្យ (429)', 'text-amber-600');
-            startRateLimitCooldown(r.rateLimited);
-            break;
-          } else {
-            setResult(i, '❌', friendlyTgError(r.data.description), 'text-red-600');
-            if ((r.data.description || '').toLowerCase().includes('unauthorized')) {
-              for (let j = i + 1; j < ids.length; j++) setResult(j, '❌', 'Bot Token មិនត្រឹមត្រូវ', 'text-red-600');
-              break;
-            }
-          }
-          await sleep(150);
+        for (const c of list) {
+          const v = await verifyChat(token, c.id);
+          if (v.rateLimited) { startRateLimitCooldown(v.rateLimited); return; }
+          if (v.unauthorized) { setTelegramBanner('❌ ' + v.note, 'error'); return; }
+          Object.assign(c, v.st === 'err' ? { st: 'err', note: v.note } : v);
+          if (c.st === 'ok') ok++;
+          renderChatList();
+          await sleep(120);
         }
-        if (!inCooldown) {
-          setTelegramBanner(
-            ok === ids.length ? `✅ តភ្ជាប់ជោគជ័យទាំង ${ok} កន្លែង!` : `⚠️ ជោគជ័យ ${ok}/${ids.length} — សូមមើលបញ្ជីខាងក្រោម`,
-            ok === ids.length ? 'success' : 'warning');
-        }
-      } catch (err) {
+        saveChats();
         setTelegramBanner(
-          '❌ Browser បានប្លុកការតភ្ជាប់ (CORS / Sandbox Restriction)។ សូមទាញយកឯកសារ .html នេះទៅបើកលើ Chrome/Safari ផ្ទាល់។',
-          'error'
-        );
+          ok === list.length ? `✅ តភ្ជាប់ជោគជ័យទាំង ${ok} កន្លែង!` : `⚠️ អាចផ្ញើបាន ${ok}/${list.length} — មើល ⚠️/❌ ក្នុងបញ្ជី`,
+          ok === list.length ? 'success' : 'warning');
+      } catch (err) {
+        setTelegramBanner('❌ Browser បានប្លុកការតភ្ជាប់ (CORS / Sandbox Restriction)។ សូមបើកឯកសារ .html នេះលើ Chrome/Safari ផ្ទាល់។', 'error');
       } finally {
-        if (!inCooldown) {
+        if (!rateLimitTimerId) {
           btnTestTelegram.disabled = false;
           btnTestTelegram.innerHTML = '<span>🔍 សាកល្បងតភ្ជាប់</span>';
         }
       }
     });
 
-    // Send one image to ALL Channels / Groups.
+    // 🚀 Send one image to ALL selected Channels / Groups.
     // Uploads the image once, then re-uses Telegram's file_id for the rest (fast).
-    btnSendTelegram.addEventListener('click', () => {
+    btnSendTelegram.addEventListener('click', async () => {
       if (isSendingTelegram || rateLimitTimerId) return;
 
       const token = tgBotToken.value.trim();
-      const ids = parseChatIds(tgChatId.value);
-      tgChatId.value = ids.join('\n'); updateChatCount();
-      try { localStorage.setItem('khmer_lottery_tg_chatid', tgChatId.value); } catch (e) {}
+      if (parseChatIds(tgChatId.value).length) await addManualChats();
+      const list = selectedChats();
       const caption = buildCaption();
 
-      if (!token || !ids.length) {
-        setTelegramBanner('⚠️ សូមបំពេញ Bot Token និង Channel/Chat ID ជាមុនសិន!', 'error');
-        showToast('⚠️ សូមបំពេញ Bot Token និង Channel/Chat ID ជាមុនសិន!', 'error');
+      if (!token || !list.length) {
+        const msg = !token ? '⚠️ សូមបំពេញ Bot Token ជាមុនសិន!' : '⚠️ សូមធីកជ្រើស Channel/Group យ៉ាងហោចណាស់ ១';
+        setTelegramBanner(msg, 'error'); showToast(msg, 'error');
         return;
       }
 
       const invalid = validateResults();
       if (invalid) { setTelegramBanner(invalid, 'error'); showToast(invalid, 'error'); return; }
-      const sig = resultSignature() + '|' + ids.join(',');
-      if (getLastSent().sig === sig && !confirm(`លទ្ធផលនេះត្រូវបានផ្ញើរួចហើយទៅ ${ids.length} កន្លែងនេះ។ ផ្ញើម្តងទៀតមែនទេ?`)) return;
+      const sig = resultSignature() + '|' + list.map(c => c.id).join(',');
+      if (getLastSent().sig === sig && !confirm(`លទ្ធផលនេះត្រូវបានផ្ញើរួចហើយទៅ ${list.length} កន្លែងនេះ។ ផ្ញើម្តងទៀតមែនទេ?`)) return;
 
       isSendingTelegram = true;
       btnSendTelegram.disabled = true;
       btnTestTelegram.disabled = true;
+      btnDiscoverChats.disabled = true;
       btnSendTelegram.innerHTML = '<span>⏳ កំពុងផ្ញើ...</span>';
       setTelegramBanner('', 'info');
 
@@ -1262,6 +1455,7 @@
           isSendingTelegram = false;
           btnSendTelegram.disabled = false;
           btnTestTelegram.disabled = false;
+          btnDiscoverChats.disabled = false;
           btnSendTelegram.innerHTML = sendBtnLabel();
         };
         if (!blob) {
@@ -1270,19 +1464,19 @@
           return;
         }
 
-        initResults(ids);
+        initResults(list);
         const asFile = chkSendAsFile.checked || blob.size > 9.5 * 1024 * 1024; // sendPhoto limit is 10MB
         const field = asFile ? 'document' : 'photo';
         const url = `https://api.telegram.org/bot${token}/${asFile ? 'sendDocument' : 'sendPhoto'}`;
         let fileId = null, ok = 0, inCooldown = false, blocked = false;
 
-        for (let i = 0; i < ids.length; i++) {
-          btnSendTelegram.innerHTML = `<span>⏳ កំពុងផ្ញើ ${i + 1}/${ids.length}...</span>`;
+        for (let i = 0; i < list.length; i++) {
+          btnSendTelegram.innerHTML = `<span>⏳ កំពុងផ្ញើ ${i + 1}/${list.length}...</span>`;
           setResult(i, '📤', 'កំពុងផ្ញើ...', 'text-sky-600');
           try {
             const r = await tgRequest(url, () => {
               const fd = new FormData();
-              fd.append('chat_id', ids[i]);
+              fd.append('chat_id', list[i].id);
               if (fileId) fd.append(field, fileId);
               else fd.append(field, blob, 'lottery_result.jpg');
               if (caption) fd.append('caption', caption);
@@ -1292,30 +1486,37 @@
             if (r.data.ok) {
               ok++;
               setResult(i, '✅', 'ផ្ញើរួច', 'text-emerald-700');
+              list[i].st = 'ok';
               if (!fileId) {
                 const res = r.data.result || {};
                 fileId = asFile ? res.document?.file_id : (res.photo && res.photo[res.photo.length - 1]?.file_id);
               }
             } else if (r.rateLimited) {
               inCooldown = true;
-              for (let j = i; j < ids.length; j++) setResult(j, '⏸️', 'មិនទាន់ផ្ញើ (429)', 'text-amber-600');
+              for (let j = i; j < list.length; j++) setResult(j, '⏸️', 'មិនទាន់ផ្ញើ (429)', 'text-amber-600');
               showToast(`⚠️ ផ្ញើញឹកញាប់ពេក (429)! សូមរង់ចាំ ${r.rateLimited} វិនាទី`, 'error');
               startRateLimitCooldown(r.rateLimited);
               break;
             } else {
-              setResult(i, '❌', friendlyTgError(r.data.description), 'text-red-600');
+              const msg = friendlyTgError(r.data.description);
+              setResult(i, '❌', msg, 'text-red-600');
+              list[i].st = 'err'; list[i].note = msg;
               if ((r.data.description || '').toLowerCase().includes('unauthorized')) {
-                for (let j = i + 1; j < ids.length; j++) setResult(j, '❌', 'Bot Token មិនត្រឹមត្រូវ', 'text-red-600');
+                for (let j = i + 1; j < list.length; j++) setResult(j, '❌', 'Bot Token មិនត្រឹមត្រូវ', 'text-red-600');
                 break;
               }
+              // Group upgraded to supergroup -> remember the new id
+              const newId = r.data.parameters?.migrate_to_chat_id;
+              if (newId) { list[i].id = newId; list[i].note = 'Group ប្ដូរ ID — សូមផ្ញើម្ដងទៀត'; }
             }
           } catch (err) {
             if (ok === 0 && i === 0) { blocked = true; break; }
             setResult(i, '❌', 'Network error', 'text-red-600');
           }
-          if (i < ids.length - 1) await sleep(400); // gentle pace to avoid 429
+          if (i < list.length - 1) await sleep(400); // gentle pace to avoid 429
         }
 
+        saveChats(); renderChatList();
         if (ok > 0) saveLastSent(sig);
 
         if (blocked) {
@@ -1326,17 +1527,18 @@
           );
           showToast('❌ Browser ប្លុកការផ្ញើ! សូមបើកឯកសារ .html លើ Chrome/Safari ផ្ទាល់', 'error');
         } else if (!inCooldown) {
-          if (ok === ids.length) {
+          if (ok === list.length) {
             setTelegramBanner(`✅ បានបង្ហោះរូបភាពចូលទាំង ${ok} Channel/Group ដោយជោគជ័យ!`, 'success');
-            showToast(`🚀 បានផ្ញើចូល ${ok}/${ids.length} កន្លែង!`);
+            showToast(`🚀 បានផ្ញើចូល ${ok}/${list.length} កន្លែង!`);
           } else {
-            setTelegramBanner(`⚠️ ផ្ញើជោគជ័យ ${ok}/${ids.length} — សូមមើលកន្លែងដែលបរាជ័យខាងក្រោម`, ok ? 'warning' : 'error');
-            showToast(`⚠️ ជោគជ័យ ${ok}/${ids.length}`, 'error');
+            setTelegramBanner(`⚠️ ផ្ញើជោគជ័យ ${ok}/${list.length} — សូមមើលកន្លែងដែលបរាជ័យខាងក្រោម`, ok ? 'warning' : 'error');
+            showToast(`⚠️ ជោគជ័យ ${ok}/${list.length}`, 'error');
           }
         }
 
         if (inCooldown) {
           isSendingTelegram = false; // cooldown timer keeps buttons locked
+          btnDiscoverChats.disabled = false;
         } else {
           finish();
         }
